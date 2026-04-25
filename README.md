@@ -90,8 +90,8 @@ pip install -r requirements.txt
 在项目根目录创建 `.env` 文件，配置模型信息：
 ```env
 API_KEY=你的API密钥
-API_URL=https://api.siliconflow.cn/v1/chat/completions
-MODEL_NAME=zai-org/GLM-4
+API_URL= https://api.siliconflow.cn/v1/chat/completions 
+MODEL_NAME=Pro/deepseek-ai/DeepSeek-V3.2
 ```
 
 ### 3. 启动服务
