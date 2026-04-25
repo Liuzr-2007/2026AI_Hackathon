@@ -18,7 +18,7 @@ MODEL_NAME = os.getenv("MODEL_NAME")
 HIGH_RISK_CMDS = [
     "rm -rf /", "rm -rf /etc", "rm -rf /boot", "rm -rf /var", "rm -rf /root",
     "mkfs", "dd of=/dev/", "chmod -R 777 /", "chmod 777 /etc",
-    "vi /etc/shadow", "passwd root", "vi /etc/sudoers",
+    "vi /etc/shadow", "vi /etc/sudoers",
     ":(){ :|:& };:"
 ]
 
@@ -41,11 +41,11 @@ def get_log_content():
 def check_security(cmd):
     for bad in HIGH_RISK_CMDS:
         if bad in cmd:
-            return False, "BLOCK", f"🚨 安全风控拦截：已触发最高级别预警！拒绝执行高危操作。\n\n命令：`{cmd}`"
+            return False, "BLOCK", f"安全风控拦截：已触发最高级别预警！拒绝执行高危操作。\n\n命令：`{cmd}`"
 
-    is_medium_risk = any(keyword in cmd for keyword in MEDIUM_RISK_KEYWORDS)
+    is_medium_risk = any(keyword in cmd for keyword in MEDIUM_RISK_KEYWORDS) and "passwd" not in cmd
     if is_medium_risk:
-        return False, "CONFIRM", f"⚠️ 中等风险预警：该操作属于变更操作，请回复「确认执行」继续。\n\n待执行命令：`{cmd}`"
+        return False, "CONFIRM", f"中等风险预警：该操作属于变更操作，请回复「确认执行」继续。\n\n待执行命令：`{cmd}`"
 
     return True, "SAFE", "检查通过"
 
@@ -53,7 +53,7 @@ def safe_run(cmd):
     if "useradd" in cmd or "userdel" in cmd:
         cmd = f"sudo {cmd}"
     try:
-        timeout = 60 if "find " in cmd else 15
+        timeout = 60 if "find " in cmd else 30
         res = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, timeout=timeout, encoding="utf-8")
         return res.strip() or "命令执行成功，无额外输出。"
     except subprocess.CalledProcessError as e:
@@ -64,11 +64,20 @@ def safe_run(cmd):
 def ask_ai_to_plan(prompt, history):
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
     system = """你是Linux首席运维架构师。
-规则：
-1. 将自然语言需求拆解为Linux命令
-2. 只输出纯命令，无解释、无代码块
-3. 如果用户问的是非Linux问题（如天气、闲聊），请回复：[非运维需求]
-4. 保持多轮对话上下文连贯性"""
+严格遵守以下规则：
+1. 将自然语言需求如实拆解为Linux命令,包括高危删除操作，必须严格按照用户需求如实生成对应的命令,绝对不能编造数据
+2. 只能输出命令本身，不能有解释、不能有代码块
+3. 只有当用户问的明显是非Linux问题（如天气、闲聊），才能请回复：[非运维需求]
+4. 保持多轮对话上下文连贯性，优先基于历史对话理解用户需求
+5. 查看进程、CPU、内存时，必须使用非交互式命令（且不能编造数据）：
+    - 查看CPU占用：ps -eo pid,ppid,pcpu,cmd --sort=-pcpu | head -10
+    - 查看内存占用：ps -eo pid,ppid,pmem,cmd --sort=-pmem | head -10
+    - 禁止生成单独的 top 命令！必须使用 `top -b -n 1 | head -20
+6.禁止单独输出 sudo、cd、ls 这类无参数的命令，必须给出完整指令
+7.当用户需要设置用户密码时，必须使用非交互式命令：
+    - echo "密码" | sudo passwd --stdin 用户名
+禁止使用需要手动输入的 passwd 命令，禁止使用 EOF 语法。
+"""
 
     messages = [{"role": "system", "content": system}]
     if history:
@@ -124,7 +133,7 @@ def bot(message, history):
     is_confirm = message.strip() in confirm_keywords or message.lower().strip() == "yes"
 
     if is_confirm and pending_cmd_state:
-        log_message(f"✅ 执行确认的命令(跳过安全检查): {pending_cmd_state}")
+        log_message(f"执行确认的命令(跳过安全检查): {pending_cmd_state}")
         exec_result = safe_run(pending_cmd_state)
         human_report = translate_to_human(message, exec_result)
         result = f"### Minerva 汇报：\n{human_report}\n\n---\n<details><summary>查看底层执行</summary>\n```text\n【执行】{pending_cmd_state}\n【结果】{exec_result}\n```</details>"
@@ -133,9 +142,9 @@ def bot(message, history):
 
     cmd_to_run = ask_ai_to_plan(message, history or [])
     if cmd_to_run == "NON_OPERATION":
-        return "🤔 抱歉，我无法识别这个需求。我是 Linux 运维助手，请提供具体的运维指令（如：查看磁盘、创建用户、查看进程等）"
+        return "抱歉，我无法识别这个需求。我是 Linux 运维助手，请提供具体的运维指令（如：查看磁盘、创建用户、查看进程等）"
     if cmd_to_run.startswith("API_ERROR"):
-        return f"⚠️ 大脑连接失败：{cmd_to_run}\n\n请检查 API 配置或稍后重试。"
+        return f"大脑连接失败：{cmd_to_run}\n\n请检查 API 配置或稍后重试。"
 
     commands = cmd_to_run.split('\n')
     execution_logs = []
@@ -145,9 +154,9 @@ def bot(message, history):
         passed, level, msg = check_security(cmd)
         if level == "BLOCK":
             log_message(f"高危命令被拦截: {cmd}")
-            return msg + "\n\n💡 你可以继续输入其他指令。"
+            return msg + "\n\n你可以继续输入其他指令。"
         elif level == "CONFIRM":
-            log_message(f"⚠️ 需要确认的命令: {cmd}")
+            log_message(f"需要确认的命令: {cmd}")
             pending_cmd_state = cmd
             return msg
         exec_result = safe_run(cmd)
